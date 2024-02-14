@@ -1,0 +1,440 @@
+---
+title: "In season estimation of EONR"
+author: "Morteza Abdipourchenarestansofla"
+date: "2024-02-14"
+output: html_document
+---
+
+
+
+```{r}
+
+
+library(sf)
+library(rsm)
+library(broom)
+library(ggplot2)
+options(scipen = 1000)
+```
+
+
+# Read data
+```{r}
+
+base_dir = getwd()
+
+data_dir = paste0(base_dir, "/", "data_maplayers_one_field.csv")
+
+data_wkt <- st_read(data_dir, options = "GEOM_POSSIBLE_NAMES=WKT")
+maplayers_sf <- data_wkt[,!(names(data_wkt) == "WKT")] 
+st_crs(maplayers_sf) <- st_crs("+proj=utm +zone=32 +datum=WGS84 +units=m +no_defs")
+
+
+## Covert datatype to numeric
+maplayers_sf[, sapply(maplayers_sf, is.character)] <- lapply(maplayers_sf[, sapply(maplayers_sf, is.character)], as.numeric)
+
+maplayers_df = sf::st_drop_geometry(maplayers_sf)
+
+
+
+
+```
+# Yield-applied N relationship using Quadratic function
+```{r}
+
+#### Wet-Mass vs applied_rate, N-treatment
+ggplot(maplayers_df, aes(x = applied_rate, y=wet_mass_idw)) + geom_point(size=3)  +
+                      geom_smooth(method = "lm", formula = y ~ poly(x,2), se=FALSE) + 
+                      ggtitle("quadratic regression") + xlab("N-applied, kg/ha") + ylab("harvested grain, kg/ha")
+
+```
+
+
+
+
+### Filter the best identified multispectral indicess during feature selection process using ANOVA and Lasso regression.
+
+```{r}
+
+candidate_VIs = c(
+                'cloud.coverage.0_CARI2_2020.03.25.10.36.59_7632',
+                'cloud.coverage.0_LCI_2020.03.25.10.36.59_7632',
+                'cloud.coverage.0_ARI2_2020.03.25.10.36.59_7632',
+                'cloud.coverage.0_CRI550_2020.03.25.10.36.59_7632',
+                'cloud.coverage.0_EVI_2020.03.25.10.36.59_7632',
+                
+                 'cloud.coverage.0_CARI_2020.03.30.10.37.00_8331',
+                'cloud.coverage.0_CARI2_2020.03.30.10.37.00_8331',
+                'cloud.coverage.0_CRI550_2020.03.30.10.37.00_8331',
+                'cloud.coverage.0_NDRE_2020.03.30.10.37.00_8331',
+                
+                'cloud.coverage.0_CARI2_2020.04.04.10.36.59_1536',
+                'cloud.coverage.0_LCI_2020.04.04.10.36.59_1536',
+                'cloud.coverage.0_CRI550_2020.04.04.10.36.59_1536',
+                'cloud.coverage.0_CRI700_2020.04.04.10.36.59_1536',
+                'cloud.coverage.0_NDRE_2020.04.04.10.36.59_1536',
+                "applied_rate",
+                "wet_mass_idw")
+
+
+
+
+candidate_VIs_df = subset(maplayers_df, select = candidate_VIs)
+
+
+```
+
+
+# Modeling with RSM
+
+```{r}
+
+reduced_model_formula = wet_mass_idw ~ SO(applied_rate,
+                        cloud.coverage.0_CARI2_2020.03.25.10.36.59_7632,
+                        cloud.coverage.0_ARI2_2020.03.25.10.36.59_7632,
+                        
+                        cloud.coverage.0_CARI_2020.03.30.10.37.00_8331,
+                        cloud.coverage.0_CRI550_2020.03.30.10.37.00_8331,
+                        
+                        cloud.coverage.0_CARI2_2020.04.04.10.36.59_1536,
+                        cloud.coverage.0_CRI700_2020.04.04.10.36.59_1536)
+
+
+
+
+full_model <- rsm(reduced_model_formula, data = candidate_VIs_df)
+mdl_summary = summary(full_model)
+mdl_summary
+```
+# Regression diagnostic plots
+
+```{r}
+
+augmented_data <- augment(full_model)
+
+# Residuals vs Fitted plot
+ggplot(data = augmented_data, aes(.fitted, .resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  ggtitle("Residuals vs Fitted") +
+  xlab("Fitted Values") +
+  ylab("Residuals") + labs(title = "Residuals vs Fitted Plot - Best-model")
+
+# Normal Q-Q plot of residuals
+ggplot(data = augmented_data, aes(sample = .std.resid)) +
+  geom_qq() +
+  geom_qq_line() +
+  ggtitle("Normal Q-Q Plot of Residuals") + labs(title = "Normal Q-Q plot of residuals - Best-model")
+
+
+
+
+```
+## Compute model accuracy. RMSE percentage
+
+```{r}
+
+# Calculate the squared differences between actual and predicted values
+squared_errors <- (candidate_VIs_df$wet_mass_idw - full_model$fitted.values)^2
+
+# Calculate the mean of squared errors
+mean_squared_error <- mean(squared_errors)
+
+# Calculate the RMSE (take the square root of the mean squared error)
+rmse <- sqrt(mean_squared_error)
+
+(rmse/mean(candidate_VIs_df$wet_mass_idw)) * 100
+
+
+
+```
+
+
+
+
+## Compute N-opt
+```{r}
+
+
+compute_n_opt = function(trainmodel, first.date.CARI2, first.date.ARI2, second.date.CARI, second.date.CRI550, third.date.CARI2, third.date.CRI700){
+  
+  
+  mdl_summary = summary(trainmodel)
+  # collected_terms = mdl_summary$coefficients[c(1:14, 30:36), ]
+  
+#######################################################################
+    ### Linear terms plus estimated coefficient for N
+    # c.0 = mdl_summary$coefficients[c(1, 3:8),]
+#######################################################################  
+  
+  first_date_CARI2 = mdl_summary$coefficients[3] * first.date.CARI2
+  
+  first_date_ARI2 = mdl_summary$coefficients[4] * first.date.ARI2
+  
+  second_date_CARI = mdl_summary$coefficients[5] * second.date.CARI
+  
+  second_date_CRI550 = mdl_summary$coefficients[6] * second.date.CRI550
+  
+  third_date_CARI2 = mdl_summary$coefficients[7] * third.date.CARI2
+
+  third_date_CRI700 = mdl_summary$coefficients[8] * third.date.CRI700
+
+  c.0 =  mdl_summary$coefficients[1] + first_date_CARI2 + first_date_ARI2 + second_date_CARI + second_date_CRI550 + third_date_CARI2 + third_date_CRI700
+  
+  
+
+#######################################################################
+    ### Interaction terms plus estimated coefficient for N
+    # C.1 = mdl_summary$coefficients[c(2, 9:14)]
+#######################################################################  
+  
+  first_date_CARI2_interaction = mdl_summary$coefficients[9] * first.date.CARI2
+  
+  first_date_ARI2_interaction = mdl_summary$coefficients[10] * first.date.ARI2
+  
+  second_date_CARI_interaction = mdl_summary$coefficients[11] * second.date.CARI
+  
+  second_date_CRI550_interaction = mdl_summary$coefficients[12] * second.date.CRI550
+
+  
+  third_date_CARI2_interaction = mdl_summary$coefficients[13] * third.date.CARI2
+
+  third_date_CRI700_interaction = mdl_summary$coefficients[14] * third.date.CRI700
+  
+  c.1 =  mdl_summary$coefficients[2] +  first_date_CARI2_interaction + first_date_ARI2_interaction + second_date_CARI_interaction + second_date_CRI550_interaction + third_date_CARI2_interaction + third_date_CRI700_interaction
+  
+
+  c.2 =  mdl_summary$coefficients[30]
+
+
+  n_opt = (0.417/0.318) * (1/(2*c.2)) - (c.1/ (2*c.2))
+  
+  
+  
+  if(class(n_opt)== "data.frame"){
+    
+    
+    names(n_opt) = "optimum_nitrogen"
+    names(c.0) = "intercept"
+    names(c.1) = "interaction_terms"
+
+
+    n_opt$intercept = c.0$intercept
+    n_opt$interaction = c.1$interaction_terms
+
+    
+    }
+  
+  
+  return(n_opt)
+  
+  
+  
+}
+
+
+
+
+
+
+
+
+
+
+#####################################################################################
+################### Prediction of EONR ############################################
+#####################################################################################
+
+
+
+final_vis_predictors = c("cloud.coverage.0_CARI2_2020.03.25.10.36.59_7632", 
+                        "cloud.coverage.0_ARI2_2020.03.25.10.36.59_7632", 
+                         "cloud.coverage.0_CARI_2020.03.30.10.37.00_8331",
+                        "cloud.coverage.0_CRI550_2020.03.30.10.37.00_8331", 
+                        "cloud.coverage.0_CARI2_2020.04.04.10.36.59_1536", 
+                        "cloud.coverage.0_CRI700_2020.04.04.10.36.59_1536")
+
+
+VIs_predictors_df = candidate_VIs_df[, final_vis_predictors]
+
+
+n_inpute = compute_n_opt(trainmodel = full_model, 
+             first.date.CARI2 = VIs_predictors_df[1], first.date.ARI2 = VIs_predictors_df[2],
+             second.date.CARI = VIs_predictors_df[3], second.date.CRI550 = VIs_predictors_df[4],
+             third.date.CARI2 = VIs_predictors_df[5], third.date.CRI700 = VIs_predictors_df[6])
+
+
+hist(n_inpute$optimum_nitrogen,  main = "Economic optimum N rate", xlab = "N-kg/ha")
+hist(candidate_VIs_df$applied_rate)
+
+```
+
+```{r}
+
+sf_final_data <- subset(maplayers_sf, select = final_vis_predictors)
+
+sf_final_data$optimum_n = n_inpute[, 'optimum_nitrogen']
+
+# Define a color palette with red, yellow, and green
+color_palette <- colorRampPalette(c("red", "yellow", "green"))
+
+# Create map view with continuous color scale
+mapview::mapview(sf_final_data, zcol = "optimum_n", col.regions = color_palette,
+        legend = TRUE, legend.style = "classic")
+
+```
+
+
+
+# Calculate Total N
+```{r}
+
+sf_final_data$optimum_n_total_N = sf_final_data$optimum_n  / 0.26
+
+
+# Define a color palette with red, yellow, and green
+color_palette <- colorRampPalette(c("red", "yellow", "green"))
+
+# Create map view with continuous color scale
+mapview::mapview(sf_final_data, zcol = "optimum_n_total_N", col.regions = color_palette,
+        legend = TRUE, legend.style = "classic")
+
+
+```
+
+
+
+# Plot two points with different EONR
+
+The location indexes we used for visualization purpose are as follows,
+1 and 1800
+
+```{r}
+
+c_value_0 <- n_inpute$intercept[1]
+c_value_1 <-n_inpute$interaction[1]
+c_value_2 <- mdl_summary$coefficients[30]
+
+# Single value N
+N <- seq(30, 90, length.out = 100)
+
+# Quadratic function
+Y <- c_value_0 + c_value_1 * N + c_value_2 * N^2
+
+
+# Calculate N for the maximum
+N_max <- -c_value_1 / (2 * c_value_2)
+
+# Calculate corresponding f(N) for the maximum
+Y_max <- c_value_0 + c_value_1 * N_max + c_value_2 * N_max^2
+
+# Plot the curve
+plot(N, Y, type = "l", col = "blue", xlab = "N kg/ha", ylab = "Y(N) kg/ha", main = "Quadratic Function")
+
+# Add a vertical line at the maximum
+abline(v = N_max, col = "red", lty = 2)
+
+# Add a legend
+legend("bottomright", legend = expression(Y(N) == c[0] + c[1] * N + c[2] * N^2), col = "blue", lty = 1)
+
+# Add text annotations for c_value_0, c_value_1, and c_value_2
+text(N[1], Y[1], paste("c[0] =", round(c_value_0, 2)), pos = 4, col = "black")
+text(N[50], Y[50], paste("c[1] =", round(c_value_1, 2)), pos = 2, col = "black")
+text(N[80], Y[80], paste("c[2] =", round(c_value_2, 2)), pos = 1, col = "black")
+
+# Print the results
+cat("N for maximum:", N_max, "\n")
+cat("Maximum value Y(N):", Y_max, "\n")
+
+
+c_value_0
+c_value_1
+c_value_2
+```
+```{r}
+
+c_value_0 <- n_inpute$intercept[1800]
+c_value_1 <-n_inpute$interaction[1800]
+c_value_2 <- mdl_summary$coefficients[30]
+
+# Single value N
+N <- seq(30, 90, length.out = 100)
+
+# Quadratic function
+Y <- c_value_0 + c_value_1 * N + c_value_2 * N^2
+
+
+# Calculate N for the maximum
+N_max <- -c_value_1 / (2 * c_value_2)
+
+# Calculate corresponding f(N) for the maximum
+Y_max <- c_value_0 + c_value_1 * N_max + c_value_2 * N_max^2
+
+# Plot the curve
+plot(N, Y, type = "l", col = "blue", xlab = "N kg/ha", ylab = "Y(N) kg/ha", main = "Quadratic Function")
+
+# Add a vertical line at the maximum
+abline(v = N_max, col = "red", lty = 2)
+
+# Add a legend
+legend("bottomright", legend = expression(Y(N) == c[0] + c[1] * N + c[2] * N^2), col = "blue", lty = 1)
+
+# Add text annotations for c_value_0, c_value_1, and c_value_2
+text(N[1], Y[1], paste("c[0] =", round(c_value_0, 2)), pos = 4, col = "black")
+text(N[50], Y[50], paste("c[1] =", round(c_value_1, 2)), pos = 2, col = "black")
+text(N[80], Y[80], paste("c[2] =", round(c_value_2, 2)), pos = 1, col = "black")
+
+# Print the results
+cat("N for maximum:", N_max, "\n")
+cat("Maximum value Y(N):", Y_max, "\n")
+
+
+c_value_0
+c_value_1
+c_value_2
+```
+
+
+# Plot a bundle of points. 
+
+Picking a few locations in the field and ploting the N-yield response. 
+
+Candidate locations are 1, 1800, 100, 200, 56, and 440.
+
+
+```{r}
+
+c_0 <- n_inpute$intercept
+c_1 <-n_inpute$interaction
+c_2 <- mdl_summary$coefficients[30]
+
+c_0_subset = c_0[c(1, 1800, 100, 200, 56, 440)]
+c_1_subset = c_1[c(1, 1800, 100, 200,  56, 440)]
+
+c_values_0 <- c_0_subset
+c_values_1 <-c_1_subset
+c_value_2 <- c_2
+
+# Single value N
+N <- seq(0, 100, length.out = 400)
+
+# Create an empty plot with specified ylim
+plot(N, rep(NA, length(N)), type = "n", col = "white", xlab = "N kg/ha", ylab = "Y(N) kg/ha", main = "Quadratic Functions", ylim = c(1000, 12000))
+
+# Plot the curves
+for (i in 1:length(c_values_0)) {
+  c_value_0 <- c_values_0[i]
+  c_value_1 <- c_values_1[i]
+  
+  # Quadratic function
+  f <- c_value_0 + c_value_1 * N + c_value_2 * N^2
+  
+  # Add the curve to the plot
+  lines(N, f, col = i + 1)  # Use different colors for each curve
+}
+
+# Add a legend
+legend("topright", legend = c(expression(Y(N) == c[0] + c[1] * N + c[2] * N^2), paste("Set ", 2:5)), col = 2:(length(c_values_0) + 1), lty = 1)
+
+```
+
